@@ -1,0 +1,6 @@
+git init
+git add stock_analysis_app.py requirements.txt config.yaml README.md
+git commit -m "Initial commit - Multi-Stock Valuation App"
+git branch -M main
+git remote add origin https://github.com/YOURUSERNAME/multi_stock_app.git
+git push -u origin main
