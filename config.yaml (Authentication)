@@ -1,0 +1,13 @@
+credentials:
+  usernames:
+    employee1:
+      name: John Doe
+      password: $2b$12$XXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    employee2:
+      name: Jane Smith
+      password: $2b$12$XXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+cookie:
+  expiry_days: 1
+  key: some_random_key
+  name: stock_app_auth
+preauthorized: {}
