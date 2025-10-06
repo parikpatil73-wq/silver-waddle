@@ -7,6 +7,103 @@ import requests
 import os
 
 Framework for Evaluating Publicly Traded Companies
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- (Any additional imports) ---
+
+# Static weights
+weights = {
+    'Customer_Value': 0.10,
+    'Unit_Economics': 0.15,
+    'TAM': 0.10,
+    'Competition': 0.10,
+    'Risks': 0.15,
+    'Valuation_Score': 0.40
+}
+
+# Helper functions...
+def fetch_current_price(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get('regularMarketPrice')
+    except Exception:
+        return None
+
+def normalize(value, low, high):
+    if value is None or np.isnan(value):
+        return 50
+    return max(0, min(100, (value - low) / (high - low) * 100))
+
+def score_factors_auto(ticker):
+    t = yf.Ticker(ticker)
+    info = t.info
+    pe_ratio = info.get('trailingPE', np.nan)
+    pb_ratio = info.get('priceToBook', np.nan)
+    gross_margins = info.get('grossMargins', np.nan)
+    operating_margins = info.get('operatingMargins', np.nan)
+    revenue_growth = info.get('revenueGrowth', np.nan)
+    beta = info.get('beta', np.nan)
+    customer_value = normalize(gross_margins or 0.3, 0.1, 0.7)
+    unit_economics = normalize(operating_margins or 0.2, 0.05, 0.4)
+    tam = normalize(revenue_growth or 0.1, -0.1, 0.3)
+    competition = 100 - normalize(pb_ratio or 5, 1, 15)
+    risks = 100 - normalize(beta or 1.2, 0.5, 2.5)
+    valuation_score = 100 - normalize(pe_ratio or 30, 5, 60)
+    scores = {
+        'Customer_Value': round(customer_value, 1),
+        'Unit_Economics': round(unit_economics, 1),
+        'TAM': round(tam, 1),
+        'Competition': round(competition, 1),
+        'Risks': round(risks, 1),
+        'Valuation_Score': round(valuation_score, 1),
+    }
+    return scores
+
+# --- Streamlit App Layout ---
+
+st.title("📊 Stock Fundamentals Analyzer")
+
+ticker = st.text_input('Ticker (e.g., AAPL, TSLA)')
+period = st.selectbox('Period (days):', [7, 30, 90, 180, 365], index=2)
+run = st.button("Analyze")
+
+if run:
+    ticker = ticker.strip().upper()
+    if not ticker:
+        st.warning("Please enter a ticker.")
+    else:
+        price = fetch_current_price(ticker)
+        if price is None:
+            st.error(f"Could not fetch price for {ticker}")
+        else:
+            try:
+                data = yf.Ticker(ticker).history(period=f"{period}d")
+                if data.empty:
+                    st.error(f"No historical data for {ticker}")
+                else:
+                    factors = score_factors_auto(ticker)
+                    weighted_score = sum(factors[f] * weights[f] for f in weights)
+                    intrinsic_value = price * (weighted_score / 100.0)
+                    df = pd.DataFrame([{
+                        "Ticker": ticker,
+                        "Current Price": price,
+                        "Intrinsic Value": round(intrinsic_value, 2),
+                        "Weighted Score": round(weighted_score, 2),
+                        **factors
+                    }])
+                    st.subheader(f"Results for {ticker}")
+                    st.dataframe(df)
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.plot(data.index, data['Close'], label='Close')
+                    ax.set_title(f"{ticker} Price (Last {period}d)")
+                    st.pyplot(fig)
+            except Exception as e:
+                st.error(str(e))
+
 
 
  
