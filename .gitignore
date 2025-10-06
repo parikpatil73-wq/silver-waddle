@@ -22,25 +22,19 @@ share/python-wheels/
 .installed.cfg
 *.egg
 PIPFILE.lock
-
 # Virtual Environment
 venv/
 ENV/
 env/
 .venv
-
 # Streamlit
 .streamlit/
-
 # Environment variables
 .env
 .env.local
 .env.*.local
-
 # Sensitive files
-config.yaml
 hashed passwords
-
 # IDE
 .vscode/
 .idea/
@@ -48,7 +42,6 @@ hashed passwords
 *.swo
 *~
 .DS_Store
-
 # OS specific
 .DS_Store
 .DS_Store?
@@ -57,26 +50,20 @@ hashed passwords
 .Trashes
 ehthumbs.db
 Thumbs.db
-
 # Logs
 *.log
-
 # Database
 *.db
 *.sqlite
 *.sqlite3
-
 # Jupyter Notebook
 .ipynb_checkpoints
-
 # pytest
 .pytest_cache/
-
 # Coverage
 .coverage
 .coverage.*
 htmlcov/
-
 # MyPy
 .mypy_cache/
 .dmypy.json
