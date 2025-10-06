@@ -19,10 +19,10 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-name, authentication_status, username = authenticator.login(location='main')
+authenticator.login()
 
-if authentication_status:
-    st.success(f"Welcome {name}!")
+if st.session_state["authentication_status"]:
+    st.success(f"Welcome {st.session_state['name']}!")
     
     # --------------------------
     # App Title
@@ -137,7 +137,7 @@ if authentication_status:
     Always consult a qualified financial advisor before making investment decisions.
     """)
     
-elif authentication_status == False:
+elif st.session_state["authentication_status"] == False:
     st.error('Username/password is incorrect')
-elif authentication_status == None:
+elif st.session_state["authentication_status"] == None:
     st.warning('Please enter your username and password')
