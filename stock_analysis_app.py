@@ -11,6 +11,17 @@ import random
 import time
 from email.message import EmailMessage
 
+# New imports for Gmail API and broker APIs
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+import os
+from typing import List, Tuple
+
+# Broker SDKs
+from ib_insync import IB
+from kiteconnect import KiteConnect
+
 # --------------------------
 # Config & Helpers
 # --------------------------
@@ -30,6 +41,96 @@ SMTP_PORT = int(st.secrets.get('SMTP_PORT', 587))
 SMTP_USER = st.secrets.get('SMTP_USER', '')
 SMTP_PASS = st.secrets.get('SMTP_PASS', '')
 FROM_EMAIL = st.secrets.get('FROM_EMAIL', SMTP_USER)
+
+# --------------------------
+# Gmail API helper (read-only)
+# --------------------------
+GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+def get_gmail_service():
+    creds = None
+    token_file = 'token.json'
+    client_config = st.secrets.get('GMAIL_OAUTH_CLIENT')
+    if os.path.exists(token_file):
+        try:
+            from google.oauth2.credentials import Credentials
+            creds = Credentials.from_authorized_user_file(token_file, GMAIL_SCOPES)
+        except Exception:
+            creds = None
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not client_config:
+                st.warning('Set GMAIL_OAUTH_CLIENT in secrets to enable Gmail import.')
+                return None
+            flow = InstalledAppFlow.from_client_config(client_config, GMAIL_SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open(token_file, 'w') as token:
+                token.write(creds.to_json())
+    try:
+        return build('gmail', 'v1', credentials=creds)
+    except Exception as e:
+        st.warning(f'Gmail build error: {e}')
+        return None
+
+
+def gmail_list_recent_subjects(service, max_items=25) -> List[str]:
+    try:
+        res = service.users().messages().list(userId='me', maxResults=max_items).execute()
+        ids = [m['id'] for m in res.get('messages', [])]
+        subjects = []
+        for mid in ids:
+            msg = service.users().messages().get(userId='me', id=mid, format='metadata', metadataHeaders=['Subject']).execute()
+            hdrs = msg.get('payload', {}).get('headers', [])
+            subj = next((h['value'] for h in hdrs if h['name'] == 'Subject'), '(no subject)')
+            subjects.append(subj)
+        return subjects
+    except Exception as e:
+        st.warning(f'Gmail list error: {e}')
+        return []
+
+# --------------------------
+# Broker connectors
+# --------------------------
+class IBKRClient:
+    def __init__(self):
+        self.ib = IB()
+    def connect(self, host='127.0.0.1', port=7497, clientId=1):
+        try:
+            self.ib.connect(host, port, clientId=clientId, timeout=5)
+            return True
+        except Exception as e:
+            st.warning(f'IBKR connection failed: {e}')
+            return False
+    def get_positions(self) -> List[Tuple[str, float]]:
+        try:
+            positions = self.ib.positions()
+            return [(p.contract.symbol.upper(), float(p.position)) for p in positions]
+        except Exception as e:
+            st.warning(f'IBKR positions error: {e}')
+            return []
+
+class ZerodhaClient:
+    def __init__(self, api_key: str, access_token: str = None):
+        self.kite = KiteConnect(api_key=api_key)
+        if access_token:
+            self.kite.set_access_token(access_token)
+    def get_holdings(self) -> List[Tuple[str, float]]:
+        try:
+            holds = self.kite.holdings()
+            return [(h['tradingsymbol'].upper(), float(h.get('quantity', 0) or 0)) for h in holds]
+        except Exception as e:
+            st.warning(f'Zerodha holdings error: {e}')
+            return []
+
+class ICICIDirectClient:
+    def get_tickers_from_input(self, txt: str) -> List[str]:
+        for s in ['\n', '\t', ';', ' ']:
+            txt = txt.replace(s, ',')
+        return [t.strip().upper() for t in txt.split(',') if t.strip()]
+
+# Existing OTP email for auth
 
 def send_otp_email(to_email: str, otp: str):
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS and FROM_EMAIL):
@@ -66,7 +167,12 @@ authenticator = stauth.Authenticate(
     cfg['cookie']['expiry_days']
 )
 
-# Tabs for Auth actions
+# Sidebar source selector and auth tab
+source = st.sidebar.selectbox(
+    'Import tickers from',
+    ['Manual Input', 'Gmail (portfolio emails)', 'IBKR', 'Zerodha', 'ICICI Direct']
+)
+
 auth_tab = st.sidebar.radio('Account', ['Login', 'Sign up', 'Reset password'])
 
 if auth_tab == 'Login':
@@ -87,7 +193,6 @@ if auth_tab == 'Sign up':
     new_username = st.text_input('Username (unique)')
     new_email = st.text_input('Work email')
     new_password = st.text_input('Password', type='password')
-
     # Step 1: Send OTP
     if st.button('Send verification code'):
         if not (new_name and new_username and new_email and new_password):
@@ -108,7 +213,6 @@ if auth_tab == 'Sign up':
             }
             if send_otp_email(new_email, otp):
                 st.success('Verification code sent to your email')
-
     # Step 2: Verify OTP and create user
     code = st.text_input('Enter verification code')
     if st.button('Verify and create account'):
@@ -121,9 +225,7 @@ if auth_tab == 'Sign up':
             elif code.strip() != item['otp']:
                 st.error('Invalid code')
             else:
-                # Hash password with streamlit_authenticator
                 hashed_pw = stauth.Hasher([item['payload']['password']]).generate()[0]
-                # Persist to config.yaml
                 cfg = load_config()
                 cfg.setdefault('credentials', {}).setdefault('usernames', {})
                 cfg['credentials']['usernames'][item['payload']['username']] = {
@@ -133,7 +235,6 @@ if auth_tab == 'Sign up':
                 }
                 save_config(cfg)
                 st.success('Account created. You can now log in')
-                # cleanup
                 st.session_state.otp_store.pop(new_email, None)
 
 # --------------------------
@@ -143,7 +244,6 @@ if auth_tab == 'Reset password':
     st.subheader('Reset password')
     rp_username = st.text_input('Username')
     rp_email = st.text_input('Registered email')
-
     if st.button('Send reset code'):
         user = cfg.get('credentials', {}).get('usernames', {}).get(rp_username)
         if not user:
@@ -155,7 +255,6 @@ if auth_tab == 'Reset password':
             st.session_state.otp_store[rp_email] = {'otp': otp, 'ts': time.time(), 'username': rp_username}
             if send_otp_email(rp_email, otp):
                 st.success('Reset code sent to your email')
-
     rp_code = st.text_input('Enter reset code')
     new_pw = st.text_input('New password', type='password')
     if st.button('Verify and update password'):
@@ -181,8 +280,60 @@ if auth_tab == 'Reset password':
 if st.session_state.get('authentication_status'):
     st.title('📊 AI-Powered Multi-Stock Valuation Dashboard')
 
-    tickers = st.sidebar.text_input('Enter Stock Tickers (comma separated)', 'AAPL, MSFT, NVDA')
     days = st.sidebar.selectbox('Historical Period (Days)', [30, 90, 180, 365], index=1)
+
+    imported_tickers: List[str] = []
+    if source == 'Manual Input':
+        manual = st.sidebar.text_input('Enter Stock Tickers (comma separated)', 'AAPL, MSFT, NVDA')
+        imported_tickers = [t.strip().upper() for t in manual.split(',') if t.strip()]
+
+    elif source == 'Gmail (portfolio emails)':
+        st.sidebar.caption('Authenticate once to read recent email subjects for tickers')
+        if st.sidebar.button('Connect Gmail'):
+            st.session_state.gmail_service_ready = True
+        if st.session_state.get('gmail_service_ready'):
+            svc = get_gmail_service()
+            if svc:
+                subs = gmail_list_recent_subjects(svc, max_items=25)
+                st.sidebar.write('Recent Subjects:')
+                for s in subs:
+                    st.sidebar.write(f'- {s}')
+                guess = ','.join(sorted({w.strip(' ,.;:()').upper() for s in subs for w in s.split() if w.isalpha() and len(w) <= 6}))
+                gmail_tickers = st.sidebar.text_input('Tickers guessed from subjects (edit as needed)', guess)
+                imported_tickers = [t.strip().upper() for t in gmail_tickers.split(',') if t.strip()]
+
+    elif source == 'IBKR':
+        with st.sidebar.expander('IBKR Connection'):
+            host = st.text_input('Host', '127.0.0.1')
+            port = st.number_input('Port', 0, 65535, 7497)
+            client_id = st.number_input('Client ID', 1, 100, 1)
+            if st.button('Connect IBKR'):
+                ibc = IBKRClient()
+                if ibc.connect(host, int(port), int(client_id)):
+                    st.success('Connected to IBKR')
+                    positions = ibc.get_positions()
+                    imported_tickers = sorted({sym for sym, _ in positions})
+                else:
+                    st.warning('IBKR connect failed')
+
+    elif source == 'Zerodha':
+        with st.sidebar.expander('Zerodha Connection'):
+            api_key = st.text_input('API Key', value=st.secrets.get('ZERODHA_API_KEY', ''))
+            access_token = st.text_input('Access Token', type='password', value=st.secrets.get('ZERODHA_ACCESS_TOKEN', ''))
+            if st.button('Fetch Holdings') and api_key and access_token:
+                zc = ZerodhaClient(api_key=api_key, access_token=access_token)
+                holds = zc.get_holdings()
+                imported_tickers = sorted({sym for sym, _ in holds})
+
+    elif source == 'ICICI Direct':
+        with st.sidebar.expander('ICICI Direct Input'):
+            raw = st.text_area('Paste tickers or portfolio symbols')
+            ic = ICICIDirectClient()
+            imported_tickers = ic.get_tickers_from_input(raw)
+
+    if not imported_tickers:
+        st.sidebar.info('No tickers imported yet. Use the selector above.')
+
     analyze = st.sidebar.button('Run Analysis')
 
     weights = {
@@ -222,52 +373,3 @@ if st.session_state.get('authentication_status'):
         valuation_score = 100 - normalize(pe_ratio or 30, 5, 60)
         return {
             'Customer_Value': round(customer_value, 1),
-            'Unit_Economics': round(unit_economics, 1),
-            'TAM': round(tam, 1),
-            'Competition': round(competition, 1),
-            'Risks': round(risks, 1),
-            'Valuation_Score': round(valuation_score, 1)
-        }
-
-    if analyze:
-        ticker_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
-        results = []
-        st.subheader('📈 Stock Comparison Dashboard')
-        for ticker in ticker_list:
-            current_price = fetch_current_price(ticker)
-            if current_price is None:
-                st.warning(f'Skipping {ticker}: could not fetch data.')
-                continue
-            scores = score_factors_auto(ticker)
-            weighted_score = sum(scores[f] * weights[f] for f in weights)
-            intrinsic_value = current_price * (weighted_score / 100)
-            undervaluation = (intrinsic_value - current_price) / current_price * 100
-            results.append({
-                'Ticker': ticker,
-                'Current Price': round(current_price, 2),
-                'Intrinsic Value': round(intrinsic_value, 2),
-                '% Undervaluation': round(undervaluation, 2),
-                'Weighted Score': round(weighted_score, 2),
-                **scores
-            })
-        if results:
-            df = pd.DataFrame(results)
-            df = df.sort_values(by='% Undervaluation', ascending=False).reset_index(drop=True)
-            st.dataframe(df)
-            st.markdown(f'### 📉 {days}-Day Historical Price Trends')
-            fig, ax = plt.subplots(figsize=(10, 5))
-            for ticker in ticker_list:
-                hist = yf.Ticker(ticker).history(period=f'{days}d')
-                if not hist.empty:
-                    ax.plot(hist.index, hist['Close'], label=ticker)
-            ax.set_xlabel('Date')
-            ax.set_ylabel('Closing Price ($)')
-            ax.legend()
-            st.pyplot(fig)
-
-    st.markdown('''
-    ---
-    ⚠️ This app is for educational/internal purposes only.
-    Data from Yahoo Finance may be delayed/inaccurate.
-    Always consult a qualified financial advisor before making investment decisions.
-    ''')
