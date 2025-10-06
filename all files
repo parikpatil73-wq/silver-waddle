@@ -1,0 +1,6 @@
+git init
+git add stock_analysis_app.py requirements.txt config.yaml
+git commit -m "Initial commit - multi-stock Streamlit app"
+git branch -M main
+git remote add origin https://github.com/YOURUSERNAME/YOUR_REPO.git
+git push -u origin main
