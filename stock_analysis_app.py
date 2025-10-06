@@ -3,373 +3,262 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import yaml
-import streamlit_authenticator as stauth
-import smtplib
-import ssl
-import random
-import time
-from email.message import EmailMessage
-
-# New imports for Gmail API and broker APIs
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-import os
-from typing import List, Tuple
-
-# Broker SDKs
-from ib_insync import IB
-from kiteconnect import KiteConnect
 
 # --------------------------
-# Config & Helpers
+# Page Config
 # --------------------------
-CONFIG_PATH = 'config.yaml'
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
-
-def save_config(cfg: dict):
-    with open(CONFIG_PATH, 'w') as f:
-        yaml.safe_dump(cfg, f)
-
-# Email sending via SMTP (use your SMTP creds from Streamlit secrets)
-SMTP_HOST = st.secrets.get('SMTP_HOST', '')
-SMTP_PORT = int(st.secrets.get('SMTP_PORT', 587))
-SMTP_USER = st.secrets.get('SMTP_USER', '')
-SMTP_PASS = st.secrets.get('SMTP_PASS', '')
-FROM_EMAIL = st.secrets.get('FROM_EMAIL', SMTP_USER)
+st.set_page_config(page_title="Stock Analysis App", page_icon="📈", layout="wide")
 
 # --------------------------
-# Gmail API helper (read-only)
+# Helper Functions
 # --------------------------
-GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-def get_gmail_service():
-    creds = None
-    token_file = 'token.json'
-    client_config = st.secrets.get('GMAIL_OAUTH_CLIENT')
-    if os.path.exists(token_file):
-        try:
-            from google.oauth2.credentials import Credentials
-            creds = Credentials.from_authorized_user_file(token_file, GMAIL_SCOPES)
-        except Exception:
-            creds = None
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not client_config:
-                st.warning('Set GMAIL_OAUTH_CLIENT in secrets to enable Gmail import.')
-                return None
-            flow = InstalledAppFlow.from_client_config(client_config, GMAIL_SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open(token_file, 'w') as token:
-                token.write(creds.to_json())
+def fetch_sp500_tickers():
+    """Fetch S&P 500 tickers from Wikipedia"""
     try:
-        return build('gmail', 'v1', credentials=creds)
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        tables = pd.read_html(url)
+        sp500_table = tables[0]
+        tickers = sp500_table['Symbol'].tolist()
+        # Clean tickers (replace dots with dashes for Yahoo Finance compatibility)
+        tickers = [ticker.replace('.', '-') for ticker in tickers]
+        return tickers
     except Exception as e:
-        st.warning(f'Gmail build error: {e}')
-        return None
-
-
-def gmail_list_recent_subjects(service, max_items=25) -> List[str]:
-    try:
-        res = service.users().messages().list(userId='me', maxResults=max_items).execute()
-        ids = [m['id'] for m in res.get('messages', [])]
-        subjects = []
-        for mid in ids:
-            msg = service.users().messages().get(userId='me', id=mid, format='metadata', metadataHeaders=['Subject']).execute()
-            hdrs = msg.get('payload', {}).get('headers', [])
-            subj = next((h['value'] for h in hdrs if h['name'] == 'Subject'), '(no subject)')
-            subjects.append(subj)
-        return subjects
-    except Exception as e:
-        st.warning(f'Gmail list error: {e}')
+        st.error(f"Error fetching S&P 500 tickers: {e}")
         return []
 
-# --------------------------
-# Broker connectors
-# --------------------------
-class IBKRClient:
-    def __init__(self):
-        self.ib = IB()
-    def connect(self, host='127.0.0.1', port=7497, clientId=1):
-        try:
-            self.ib.connect(host, port, clientId=clientId, timeout=5)
-            return True
-        except Exception as e:
-            st.warning(f'IBKR connection failed: {e}')
-            return False
-    def get_positions(self) -> List[Tuple[str, float]]:
-        try:
-            positions = self.ib.positions()
-            return [(p.contract.symbol.upper(), float(p.position)) for p in positions]
-        except Exception as e:
-            st.warning(f'IBKR positions error: {e}')
-            return []
-
-class ZerodhaClient:
-    def __init__(self, api_key: str, access_token: str = None):
-        self.kite = KiteConnect(api_key=api_key)
-        if access_token:
-            self.kite.set_access_token(access_token)
-    def get_holdings(self) -> List[Tuple[str, float]]:
-        try:
-            holds = self.kite.holdings()
-            return [(h['tradingsymbol'].upper(), float(h.get('quantity', 0) or 0)) for h in holds]
-        except Exception as e:
-            st.warning(f'Zerodha holdings error: {e}')
-            return []
-
-class ICICIDirectClient:
-    def get_tickers_from_input(self, txt: str) -> List[str]:
-        for s in ['\n', '\t', ';', ' ']:
-            txt = txt.replace(s, ',')
-        return [t.strip().upper() for t in txt.split(',') if t.strip()]
-
-# Existing OTP email for auth
-
-def send_otp_email(to_email: str, otp: str):
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and FROM_EMAIL):
-        st.error('Email is not configured. Set SMTP_* and FROM_EMAIL in Streamlit secrets.')
-        return False
-    msg = EmailMessage()
-    msg['Subject'] = 'Your verification code'
-    msg['From'] = FROM_EMAIL
-    msg['To'] = to_email
-    msg.set_content(f"Your verification code is: {otp}. It expires in 10 minutes.")
+def fetch_stock_data(ticker):
+    """Fetch stock price and financial data using yfinance"""
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls(context=context)
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        return True
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        data = {
+            'Ticker': ticker,
+            'Name': info.get('longName', 'N/A'),
+            'Current_Price': info.get('currentPrice', np.nan),
+            'PE_Ratio': info.get('trailingPE', np.nan),
+            'PB_Ratio': info.get('priceToBook', np.nan),
+            'PS_Ratio': info.get('priceToSalesTrailing12Months', np.nan),
+            'Dividend_Yield': info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0,
+            'ROE': info.get('returnOnEquity', np.nan) * 100 if info.get('returnOnEquity') else np.nan,
+            'Profit_Margin': info.get('profitMargins', np.nan) * 100 if info.get('profitMargins') else np.nan,
+            'Revenue_Growth': info.get('revenueGrowth', np.nan) * 100 if info.get('revenueGrowth') else np.nan,
+            'EPS': info.get('trailingEps', np.nan),
+            'Beta': info.get('beta', np.nan),
+            'Market_Cap': info.get('marketCap', np.nan),
+            'Sector': info.get('sector', 'N/A')
+        }
+        return data
     except Exception as e:
-        st.error(f'Failed to send email: {e}')
-        return False
+        return None
 
-# OTP store in session
-if 'otp_store' not in st.session_state:
-    st.session_state.otp_store = {}
+def calculate_valuation_score(row):
+    """Calculate a composite valuation score based on multiple factors"""
+    score = 0
+    weight_total = 0
+    
+    # Lower P/E is better (inverse score)
+    if pd.notna(row['PE_Ratio']) and row['PE_Ratio'] > 0:
+        pe_score = max(0, 100 - (row['PE_Ratio'] - 10) * 2)  # Ideal P/E around 10-20
+        score += pe_score * 0.25
+        weight_total += 0.25
+    
+    # Lower P/B is better
+    if pd.notna(row['PB_Ratio']) and row['PB_Ratio'] > 0:
+        pb_score = max(0, 100 - (row['PB_Ratio'] - 1) * 20)  # Ideal P/B around 1-3
+        score += pb_score * 0.20
+        weight_total += 0.20
+    
+    # Lower P/S is better
+    if pd.notna(row['PS_Ratio']) and row['PS_Ratio'] > 0:
+        ps_score = max(0, 100 - (row['PS_Ratio'] - 1) * 15)  # Ideal P/S around 1-3
+        score += ps_score * 0.15
+        weight_total += 0.15
+    
+    # Higher ROE is better
+    if pd.notna(row['ROE']) and row['ROE'] > 0:
+        roe_score = min(100, row['ROE'] * 5)  # 20% ROE = 100 score
+        score += roe_score * 0.20
+        weight_total += 0.20
+    
+    # Higher Profit Margin is better
+    if pd.notna(row['Profit_Margin']) and row['Profit_Margin'] > 0:
+        margin_score = min(100, row['Profit_Margin'] * 5)  # 20% margin = 100 score
+        score += margin_score * 0.10
+        weight_total += 0.10
+    
+    # Higher Dividend Yield is better (bonus)
+    if pd.notna(row['Dividend_Yield']) and row['Dividend_Yield'] > 0:
+        div_score = min(100, row['Dividend_Yield'] * 20)  # 5% yield = 100 score
+        score += div_score * 0.10
+        weight_total += 0.10
+    
+    # Normalize score
+    if weight_total > 0:
+        return score / weight_total
+    return 0
 
 # --------------------------
-# Authentication (existing login)
+# Main App
 # --------------------------
-cfg = load_config()
-authenticator = stauth.Authenticate(
-    cfg['credentials'],
-    cfg['cookie']['name'],
-    cfg['cookie']['key'],
-    cfg['cookie']['expiry_days']
+
+st.title("📈 Global Stock & ETF Analysis App")
+st.markdown("### Powered by yfinance - Live Market Data")
+
+# Sidebar
+st.sidebar.header("Analysis Options")
+
+analysis_mode = st.sidebar.radio(
+    "Select Analysis Mode:",
+    ["S&P 500 Top Undervalued Stocks", "Custom Ticker Analysis"]
 )
 
-# Sidebar source selector and auth tab
-source = st.sidebar.selectbox(
-    'Import tickers from',
-    ['Manual Input', 'Gmail (portfolio emails)', 'IBKR', 'Zerodha', 'ICICI Direct']
-)
-
-auth_tab = st.sidebar.radio('Account', ['Login', 'Sign up', 'Reset password'])
-
-if auth_tab == 'Login':
-    authenticator.login()
-    if st.session_state.get('authentication_status'):
-        st.success(f"Welcome {st.session_state.get('name')}!")
-    elif st.session_state.get('authentication_status') is False:
-        st.error('Username/password is incorrect')
-    else:
-        st.info('Please enter your username and password')
-
-# --------------------------
-# Sign up with Email OTP (adds to config.yaml)
-# --------------------------
-if auth_tab == 'Sign up':
-    st.subheader('Create a new account')
-    new_name = st.text_input('Full name')
-    new_username = st.text_input('Username (unique)')
-    new_email = st.text_input('Work email')
-    new_password = st.text_input('Password', type='password')
-    # Step 1: Send OTP
-    if st.button('Send verification code'):
-        if not (new_name and new_username and new_email and new_password):
-            st.warning('Please fill all fields')
-        elif new_username in cfg.get('credentials', {}).get('usernames', {}):
-            st.error('Username already exists')
-        else:
-            otp = f"{random.randint(100000, 999999)}"
-            st.session_state.otp_store[new_email] = {
-                'otp': otp,
-                'ts': time.time(),
-                'payload': {
-                    'name': new_name,
-                    'username': new_username,
-                    'password': new_password,
-                    'email': new_email,
-                }
-            }
-            if send_otp_email(new_email, otp):
-                st.success('Verification code sent to your email')
-    # Step 2: Verify OTP and create user
-    code = st.text_input('Enter verification code')
-    if st.button('Verify and create account'):
-        item = st.session_state.otp_store.get(new_email)
-        if not item:
-            st.error('No code sent or session expired')
-        else:
-            if time.time() - item['ts'] > 600:
-                st.error('Code expired. Please request a new one')
-            elif code.strip() != item['otp']:
-                st.error('Invalid code')
-            else:
-                hashed_pw = stauth.Hasher([item['payload']['password']]).generate()[0]
-                cfg = load_config()
-                cfg.setdefault('credentials', {}).setdefault('usernames', {})
-                cfg['credentials']['usernames'][item['payload']['username']] = {
-                    'name': item['payload']['name'],
-                    'password': hashed_pw,
-                    'email': item['payload']['email']
-                }
-                save_config(cfg)
-                st.success('Account created. You can now log in')
-                st.session_state.otp_store.pop(new_email, None)
-
-# --------------------------
-# Reset password with Email OTP
-# --------------------------
-if auth_tab == 'Reset password':
-    st.subheader('Reset password')
-    rp_username = st.text_input('Username')
-    rp_email = st.text_input('Registered email')
-    if st.button('Send reset code'):
-        user = cfg.get('credentials', {}).get('usernames', {}).get(rp_username)
-        if not user:
-            st.error('Username not found')
-        elif user.get('email') != rp_email:
-            st.error('Email does not match our records')
-        else:
-            otp = f"{random.randint(100000, 999999)}"
-            st.session_state.otp_store[rp_email] = {'otp': otp, 'ts': time.time(), 'username': rp_username}
-            if send_otp_email(rp_email, otp):
-                st.success('Reset code sent to your email')
-    rp_code = st.text_input('Enter reset code')
-    new_pw = st.text_input('New password', type='password')
-    if st.button('Verify and update password'):
-        item = st.session_state.otp_store.get(rp_email)
-        if not item:
-            st.error('No code sent or session expired')
-        else:
-            if time.time() - item['ts'] > 600:
-                st.error('Code expired. Please request a new one')
-            elif rp_code.strip() != item['otp']:
-                st.error('Invalid code')
-            else:
-                hashed_pw = stauth.Hasher([new_pw]).generate()[0]
-                cfg = load_config()
-                cfg['credentials']['usernames'][item['username']]['password'] = hashed_pw
-                save_config(cfg)
-                st.success('Password updated. You can now log in')
-                st.session_state.otp_store.pop(rp_email, None)
-
-# --------------------------
-# Main App (requires auth)
-# --------------------------
-if st.session_state.get('authentication_status'):
-    st.title('📊 AI-Powered Multi-Stock Valuation Dashboard')
-
-    days = st.sidebar.selectbox('Historical Period (Days)', [30, 90, 180, 365], index=1)
-
-    imported_tickers: List[str] = []
-    if source == 'Manual Input':
-        manual = st.sidebar.text_input('Enter Stock Tickers (comma separated)', 'AAPL, MSFT, NVDA')
-        imported_tickers = [t.strip().upper() for t in manual.split(',') if t.strip()]
-
-    elif source == 'Gmail (portfolio emails)':
-        st.sidebar.caption('Authenticate once to read recent email subjects for tickers')
-        if st.sidebar.button('Connect Gmail'):
-            st.session_state.gmail_service_ready = True
-        if st.session_state.get('gmail_service_ready'):
-            svc = get_gmail_service()
-            if svc:
-                subs = gmail_list_recent_subjects(svc, max_items=25)
-                st.sidebar.write('Recent Subjects:')
-                for s in subs:
-                    st.sidebar.write(f'- {s}')
-                guess = ','.join(sorted({w.strip(' ,.;:()').upper() for s in subs for w in s.split() if w.isalpha() and len(w) <= 6}))
-                gmail_tickers = st.sidebar.text_input('Tickers guessed from subjects (edit as needed)', guess)
-                imported_tickers = [t.strip().upper() for t in gmail_tickers.split(',') if t.strip()]
-
-    elif source == 'IBKR':
-        with st.sidebar.expander('IBKR Connection'):
-            host = st.text_input('Host', '127.0.0.1')
-            port = st.number_input('Port', 0, 65535, 7497)
-            client_id = st.number_input('Client ID', 1, 100, 1)
-            if st.button('Connect IBKR'):
-                ibc = IBKRClient()
-                if ibc.connect(host, int(port), int(client_id)):
-                    st.success('Connected to IBKR')
-                    positions = ibc.get_positions()
-                    imported_tickers = sorted({sym for sym, _ in positions})
+if analysis_mode == "S&P 500 Top Undervalued Stocks":
+    st.header("🔍 S&P 500 Undervalued Stock Analysis")
+    
+    st.markdown("""
+    This analysis:
+    1. **Fetches S&P 500 tickers** from Wikipedia
+    2. **Uses yfinance** to get live price and financial data
+    3. **Runs valuation scoring** based on P/E, P/B, P/S, ROE, Profit Margin, and Dividend Yield
+    4. **Shows the top 10 undervalued stocks** with the best scores
+    """)
+    
+    if st.button("🚀 Run S&P 500 Analysis", type="primary"):
+        with st.spinner("Fetching S&P 500 tickers from Wikipedia..."):
+            sp500_tickers = fetch_sp500_tickers()
+        
+        if sp500_tickers:
+            st.success(f"✅ Fetched {len(sp500_tickers)} S&P 500 tickers")
+            
+            with st.spinner("Analyzing stocks... This may take a few minutes..."):
+                results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for idx, ticker in enumerate(sp500_tickers):
+                    status_text.text(f"Analyzing {ticker} ({idx+1}/{len(sp500_tickers)})")
+                    data = fetch_stock_data(ticker)
+                    if data:
+                        results.append(data)
+                    progress_bar.progress((idx + 1) / len(sp500_tickers))
+                
+                status_text.empty()
+                progress_bar.empty()
+                
+                if results:
+                    df = pd.DataFrame(results)
+                    
+                    # Calculate valuation scores
+                    df['Valuation_Score'] = df.apply(calculate_valuation_score, axis=1)
+                    
+                    # Filter out stocks with insufficient data
+                    df_valid = df[df['Valuation_Score'] > 0].copy()
+                    
+                    # Sort by valuation score (descending)
+                    df_sorted = df_valid.sort_values('Valuation_Score', ascending=False)
+                    
+                    # Get top 10
+                    top_10 = df_sorted.head(10)
+                    
+                    st.success(f"✅ Analysis complete! Found {len(df_valid)} stocks with sufficient data.")
+                    
+                    st.header("🏆 Top 10 Undervalued Stocks")
+                    
+                    # Display table
+                    display_cols = ['Ticker', 'Name', 'Sector', 'Current_Price', 'PE_Ratio', 'PB_Ratio', 
+                                    'ROE', 'Profit_Margin', 'Dividend_Yield', 'Valuation_Score']
+                    st.dataframe(
+                        top_10[display_cols].style.format({
+                            'Current_Price': '${:.2f}',
+                            'PE_Ratio': '{:.2f}',
+                            'PB_Ratio': '{:.2f}',
+                            'ROE': '{:.2f}%',
+                            'Profit_Margin': '{:.2f}%',
+                            'Dividend_Yield': '{:.2f}%',
+                            'Valuation_Score': '{:.2f}'
+                        }).background_gradient(subset=['Valuation_Score'], cmap='RdYlGn'),
+                        use_container_width=True
+                    )
+                    
+                    # Visualization
+                    st.subheader("📊 Valuation Score Comparison")
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    ax.barh(top_10['Ticker'], top_10['Valuation_Score'], color='steelblue')
+                    ax.set_xlabel('Valuation Score')
+                    ax.set_title('Top 10 Undervalued S&P 500 Stocks')
+                    ax.invert_yaxis()
+                    st.pyplot(fig)
+                    
+                    # Download option
+                    csv = df_sorted.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Full Analysis (CSV)",
+                        data=csv,
+                        file_name="sp500_valuation_analysis.csv",
+                        mime="text/csv"
+                    )
                 else:
-                    st.warning('IBKR connect failed')
+                    st.error("No data retrieved. Please try again.")
+        else:
+            st.error("Failed to fetch S&P 500 tickers.")
 
-    elif source == 'Zerodha':
-        with st.sidebar.expander('Zerodha Connection'):
-            api_key = st.text_input('API Key', value=st.secrets.get('ZERODHA_API_KEY', ''))
-            access_token = st.text_input('Access Token', type='password', value=st.secrets.get('ZERODHA_ACCESS_TOKEN', ''))
-            if st.button('Fetch Holdings') and api_key and access_token:
-                zc = ZerodhaClient(api_key=api_key, access_token=access_token)
-                holds = zc.get_holdings()
-                imported_tickers = sorted({sym for sym, _ in holds})
+elif analysis_mode == "Custom Ticker Analysis":
+    st.header("🔎 Custom Ticker Analysis")
+    
+    ticker_input = st.text_input("Enter ticker symbol (e.g., AAPL, MSFT, TSLA):", "AAPL")
+    
+    if st.button("Analyze Ticker", type="primary"):
+        if ticker_input:
+            with st.spinner(f"Fetching data for {ticker_input}..."):
+                data = fetch_stock_data(ticker_input.upper())
+            
+            if data:
+                st.success(f"✅ Data retrieved for {ticker_input.upper()}")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Company", data['Name'])
+                    st.metric("Current Price", f"${data['Current_Price']:.2f}" if pd.notna(data['Current_Price']) else "N/A")
+                    st.metric("Sector", data['Sector'])
+                
+                with col2:
+                    st.metric("P/E Ratio", f"{data['PE_Ratio']:.2f}" if pd.notna(data['PE_Ratio']) else "N/A")
+                    st.metric("P/B Ratio", f"{data['PB_Ratio']:.2f}" if pd.notna(data['PB_Ratio']) else "N/A")
+                    st.metric("Beta", f"{data['Beta']:.2f}" if pd.notna(data['Beta']) else "N/A")
+                
+                with col3:
+                    st.metric("ROE", f"{data['ROE']:.2f}%" if pd.notna(data['ROE']) else "N/A")
+                    st.metric("Profit Margin", f"{data['Profit_Margin']:.2f}%" if pd.notna(data['Profit_Margin']) else "N/A")
+                    st.metric("Dividend Yield", f"{data['Dividend_Yield']:.2f}%" if pd.notna(data['Dividend_Yield']) else "N/A")
+                
+                # Calculate valuation score
+                df_temp = pd.DataFrame([data])
+                valuation_score = calculate_valuation_score(df_temp.iloc[0])
+                
+                st.subheader("Valuation Score")
+                st.progress(valuation_score / 100)
+                st.write(f"**Score: {valuation_score:.2f} / 100**")
+                
+                # Price chart
+                st.subheader("📈 Price History (Last 6 Months)")
+                ticker_obj = yf.Ticker(ticker_input.upper())
+                hist = ticker_obj.history(period="6mo")
+                
+                if not hist.empty:
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    ax.plot(hist.index, hist['Close'], linewidth=2, color='steelblue')
+                    ax.set_xlabel('Date')
+                    ax.set_ylabel('Price ($)')
+                    ax.set_title(f'{ticker_input.upper()} Price History (6 Months)')
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+            else:
+                st.error(f"Could not fetch data for {ticker_input.upper()}. Please check the ticker symbol.")
+        else:
+            st.warning("Please enter a ticker symbol.")
 
-    elif source == 'ICICI Direct':
-        with st.sidebar.expander('ICICI Direct Input'):
-            raw = st.text_area('Paste tickers or portfolio symbols')
-            ic = ICICIDirectClient()
-            imported_tickers = ic.get_tickers_from_input(raw)
-
-    if not imported_tickers:
-        st.sidebar.info('No tickers imported yet. Use the selector above.')
-
-    analyze = st.sidebar.button('Run Analysis')
-
-    weights = {
-        'Customer_Value': 0.10,
-        'Unit_Economics': 0.15,
-        'TAM': 0.10,
-        'Competition': 0.10,
-        'Risks': 0.15,
-        'Valuation_Score': 0.40
-    }
-
-    def fetch_current_price(ticker):
-        try:
-            return yf.Ticker(ticker).info.get('regularMarketPrice')
-        except Exception:
-            return None
-
-    def normalize(value, low, high):
-        if value is None or np.isnan(value):
-            return 50
-        return max(0, min(100, (value - low) / (high - low) * 100))
-
-    def score_factors_auto(ticker):
-        t = yf.Ticker(ticker)
-        info = t.info
-        pe_ratio = info.get('trailingPE', np.nan)
-        pb_ratio = info.get('priceToBook', np.nan)
-        gross_margins = info.get('grossMargins', np.nan)
-        operating_margins = info.get('operatingMargins', np.nan)
-        revenue_growth = info.get('revenueGrowth', np.nan)
-        beta = info.get('beta', np.nan)
-        customer_value = normalize(gross_margins or 0.3, 0.1, 0.7)
-        unit_economics = normalize(operating_margins or 0.2, 0.05, 0.4)
-        tam = normalize(revenue_growth or 0.1, -0.1, 0.3)
-        competition = 100 - normalize(pb_ratio or 5, 1, 15)
-        risks = 100 - normalize(beta or 1.2, 0.5, 2.5)
-        valuation_score = 100 - normalize(pe_ratio or 30, 5, 60)
-        return {
-            'Customer_Value': round(customer_value, 1),
+st.sidebar.markdown("---")
+st.sidebar.info("📊 **Data Source:** Yahoo Finance via yfinance\n\n⚠️ **Disclaimer:** This tool is for educational purposes only. Not financial advice.")
