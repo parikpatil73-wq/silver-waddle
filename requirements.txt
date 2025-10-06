@@ -3,11 +3,4 @@ yfinance
 pandas
 numpy
 matplotlib
-PyYAML
-streamlit-authenticator
-bcrypt
-google-auth
-google-api-python-client
-google-auth-oauthlib
-ib_insync
-kiteconnect
+lxml
